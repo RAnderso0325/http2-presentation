@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+
+  <title>HTTP/2? Yeah we can do that</title>
+
+  <meta name="description" content="NodeConfEU 2017 - Node.js: What's Next">
+  <meta name="author" content="James M Snell">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style"
+        content="black-translucent">
+
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+  <link rel="stylesheet" href="css/reveal.css">
+  <link rel="stylesheet" href="css/theme/nodejs.css" id="theme">
+
+  <!-- Theme used for syntax highlighting of code -->
+  <link rel="stylesheet" href="lib/css/zenburn.css">
+
+  <script>
+    var link = document.createElement( 'link' );
+    link.rel = 'stylesheet';
+    link.type = 'text/css';
+    link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : 'css/print/paper.css';
+    document.getElementsByTagName( 'head' )[0].appendChild( link );
+  </script>
+
+  <!--[if lt IE 9]>
+  <script src="lib/js/html5shiv.js"></script>
+  <![endif]-->
+</head>
+
+<body>
+  <img src="media/nearform.png" width="150"/>
+  <div class="reveal">
+    <div class="slides">
+
+      <section data-background="media/hexagons.png" style="text-align: left;">
+        <h1>HTTP/2...</h1>
+        <h3>Yeah, we can do that</h3>
+        <p>
+          <small><a href="https://github.com/jasnell">James M Snell</a> / <a href="http://twitter.com/jasnell">@jasnell</a></small>
+        </p>
+      </section>
+
+      <section data-background="media/hexagons.png" style="text-align: left;">
+        <section>
+          <h1>But first...</h1>
+          <h3>What exactly is HTTP/2...</h3>
+        </section>
+        <section>
+          <h1>A new protocol...</h1>
+          <p>
+            Yes, it uses the same request/response semantics as HTTP/1.1, but introduces...
+          </p>
+          <ul>
+            <li>Binary framing</li>
+            <li>Stateful header compression</li>
+            <li>Multiplexing (a.k.a "Streams")</li>
+            <li>Connection and Stream level flow control</li>
+            <li>Prioritization</li>
+            <li>Server push</li>
+            <li>New security requirements</li>
+            <li>New headers, error, and response codes</li>
+            <li>Repeatable requests</li>
+            <li>Settings negotiation</li>
+            <li>Connection-level Ping</li>
+          </ul>
+        </section>
+        <section>
+          <h1>HTTP/2 is a complex protocol.</h1>
+          <p>
+            HTTP/2 significantly increases the fundamental complexity of
+            HTTP. This has meant creating an entirely new internal code
+            path within Node.js to support it.
+          </p>
+          <p>
+            In other words, we did not extend the existing HTTP/1.1
+            implementation, we created an entirely new subsystem within
+            Node.js core.
+          </p>
+        </section>
+      </section>
+
+      <section data-background="media/hexagons.png" style="text-align: left;">
+        <section>
+          <h1>Let's start with the basics...</h1>
+          <h3>A simple HTTP/2 server...</h3>
+<pre><code class="hljs" data-trim contenteditable>
+const http2 = require('http2');
+
+const key = fs.readFileSync('../key.pem');
+const cert = fs.readFileSync('../cert.pem');
+
+const server = http2.createSecureServer({ key, cert });
+server.on('stream', (stream, headers) => {
+  stream.respond();
+  stream.end('Hello World');
+});
+
+server.listen(8888);
+</code></pre>
+        </section>
+        <section>
+            <h1>Breaking it down...</h1>
+            <p>
+              Node.js supports HTTP/2 over plain-text and TLS.<br />Web Browsers,
+              however, require that we use TLS...
+            </p>
+<pre><code class="hljs" data-trim contenteditable>
+const key = fs.readFileSync('../key.pem');
+const cert = fs.readFileSync('../cert.pem');
+
+const server = http2.createSecureServer({ key, cert });
+</code></pre>
+        </section>
+        <section>
+          <h1>Breaking it down...</h1>
+          <p>
+            The new HTTP/2 implementation supports a low-level Core
+            API and a high-level Compatibility API that is designed
+            to be roughly compatible with the HTTP/1.1 module.
+          </p>
+          <p>
+            The low-level Core API works with `Http2Stream` objects
+            directly:
+          </p>
+<pre><code class="hljs" data-trim contenteditable>
+server.on('stream', (stream, headers) => {
+  stream.respond();
+  stream.end('Hello World');
+});
+</code></pre>
+          <p>
+            The Compatibility API is nearly identical to HTTP/1:
+          </p>
+<pre><code class="hljs" data-trim contenteditable>
+server.on('request', (req, res) => {
+  res.writeHead(200);
+  res.end('Hello World');
+});
+</code></pre>
+        </section>
+        <section>
+          <h1>Which should you use...</h1>
+          <p>
+            The Core API provides the most flexibility, the best performance,
+            and direct access to new HTTP/2 features.
+          </p>
+          <p>
+            The Compatibility API is more familiar, and is easier to port
+            existing HTTP/1 code to use.
+          </p>
+        </section>
+      </section>
+
+      <section data-background="media/hexagons.png" style="text-align: left;">
+        <section>
+          <h1>How does it work</h1>
+          <p>
+            With HTTP/1.1, TCP connections generally permit only a single
+            request/response transaction at a time. Pipelining does allow
+            multiple requests to be sent in a sequence, but those are
+            serialized and processed one after the other.
+          </p>
+          <img src="media/http1_flow.png" 
+               style="margin-right: 20px; float: left; background: rgba(255, 255, 255, 1)"
+               width="350"/>
+          <p>
+            Generally, a single TCP connection can carry only a single HTTP/1
+            request/response at a time.
+          </p>
+          <p style="font-size: 0.5em">(Image credit: By <a href="//commons.wikimedia.org/w/index.php?title=User:Mwhitlock&amp;action=edit&amp;redlink=1" class="new" title="User:Mwhitlock (page does not exist)">Mwhitlock</a> - <span class="int-own-work" lang="en">Own work</span>, Public Domain, <a href="https://commons.wikimedia.org/w/index.php?curid=8236059">Link</a>)</p>
+        </section>
+        <section>
+          <h1>HTTP/2 multiplexing changes that...</h1>
+          <p>
+            HTTP/2 central feature is to eliminate this restriction via
+            multiplexing... that is multiple simultaneous HTTP request/response
+            operations may exist within a single long-lived TCP connection,
+            and response may be sent in any order.
+          </p>
+          <img src="media/http2_flow.png" 
+               style="margin-right: 20px; float: left; background: rgba(255, 255, 255, 0.82)"
+               width="350"/>
+          <p>
+            Headers and data from multiple requests and responses flow
+            simultaneously over the connection within discreet packets
+            called "frames".
+          </p>
+          <p style="font-size: 0.5em">(Image credit: By <a href="http://blog.scottlogic.com/2014/11/07/http-2-a-quick-look.html">William Reilly</a>)</p>
+        </section>
+        <section>
+          <h1>Http2Session and Http2Stream</h1>
+          <p>
+            The <code>Http2Session</code> is a potentially long-lived object
+            that manages the state of an HTTP/2 TCP connection.
+          </p>
+          <p>
+            The <code>Http2Stream</code> is an object representing a single
+            HTTP request and response flow within an <code>Http2Session</code>.
+          </p>
+          <img src="media/http2_container.png" 
+               style="margin-right: 20px; float: left; background: rgba(255, 255, 255, 0.82)"
+               width="350"/>
+          <p>
+            A single <code>Http2Session</code> may (theoretically) contain up to
+            2<sup>31</sup>-1<sup>*</sup> concurrent <code>Http2Stream</code>
+            instances. 
+          </p>
+          <p style="font-size: 0.5em">
+            <sup>*</sup>(The actual number is typically around 100 or so)
+          </p>
+        </section>
+      </section>
+
+      <section data-background="media/hexagons.png" style="text-align: left;">
+        <section>
+            <h1>Using Http2Stream</h1>
+            <p>
+              <code>Http2Stream</code> is a Node.js streams <code>Duplex</code>
+              that is used to read and write HTTP request and response data.
+            </p>
+<pre><code class="hljs" data-trim contenteditable>
+server.on('stream', (stream, headers) => {
+  stream.on('data', (chunk) => { /* ... */ });
+  stream.on('end', () => { /* ... */ });
+  stream.respond();
+  stream.end('Hello World');
+});
+</code></pre>
+            <p>
+              When using the Core API, <code>Http2Stream</code> is the object
+              you'll be working with most often.
+            </p>
+          </section>
+          <section>
+            <h1>Using Http2Stream</h1>
+            <p>
+              On the server side, <code>Http2Stream</code> can be used to
+              initiate push streams...
+            </p>
+<pre><code class="hljs" data-trim contenteditable>
+server.on('stream', (stream, headers) => {
+
+  stream.pushStream({ ':path': '/mycode.js' }, (err, stream) => {
+    stream.respond();
+    stream.end('alert("hello world")');
+  });
+
+  stream.respond();
+  stream.end('Hello World');
+});
+</code></pre>
+        </section>
+        <section>
+          <h1>Using Http2Stream</h1>
+          <p>
+            Also on the server side, <code>Http2Stream</code> can be used to
+            send informational (1xx) headers...
+          </p>
+<pre><code class="hljs" data-trim contenteditable>
+server.on('stream', (stream, headers) => {
+  stream.additionalHeaders({
+    ':status': 102,
+    'abc': 'xyz'
+  });
+  stream.respond();
+  stream.end('Hello World');
+});
+</code></pre>
+        </section>
+        <section>
+            <h1>Using Http2Stream</h1>
+            <p>
+              We can also bypass the Streams API entirely and send a file
+              (with all i/o happening at the C++ level)
+            </p>
+<pre><code class="hljs" data-trim contenteditable>
+server.on('stream', (stream, headers) => {
+  stream.respondWithFile('some-file-to-send');
+});
+
+const fd = fs.openSync('some-file-to-send', 'r')';'
+server.on('stream', (stream, headers) => {
+  stream.respondWithFD(fd);
+});
+</code></pre>
+            <p>This is a lot faster.</p>
+          </section>
+      </section>
+
+      <section data-background="media/hexagons.png" style="text-align: left;">
+        <section>
+          <h1>Using Http2Session</h1>
+          <p>
+            The <code>Http2Session</code> object is used to:
+          </p>
+          <ul>
+            <li>Change connection-level settings</li>
+            <li>
+              Send connection-level pings (test round-trip time, liveness)
+            </li>
+            <li>Send alternative-service (ALT-SVC) frames</li>
+            <li>Check connection state and other miscellaneous bits...</li>
+          </ul>
+        </section>
+        <section>
+          <h1>Using Http2Session</h1>
+          <p>For example, sending a PING</p>
+<pre><code class="hljs" data-trim contenteditable>
+server.on('session', (session) => {
+  session.ping(
+    Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]),
+    (err, duration, payload) => {
+      console.log(`Round-trip took ${duration} milliseconds`);
+    }
+  );
+});
+</code></pre>
+          <p>Pings may be sent by the client or server.</p>
+        </section>
+      </section>
+
+      <section data-background="media/hexagons.png" style="text-align: left;">
+        <h1>What about client-side...</h1>
+        <p>Here is a simple GET request:</p>
+<pre><code class="hljs" data-trim contenteditable>
+const http2 = require('http2');
+const session = http2.connect('https://localhost:1234');
+
+const stream = session.request({ ':path': '/' });
+stream.on('response', (headers) => {
+  stream.on('data', (chunk) => { /** .. **/ });
+  stream.on('end', () => { /** .. **/ });
+});
+</code></pre>
+        <p>Currently there is no Compatibility API for the client side.</p>
+      </section>
+
+      <section data-background="media/hexagons.png" style="text-align: left;">
+        <section>
+          <h1>Configuration Options</h1>
+          <p>
+            HTTP/2 exposes many configuration options...
+          </p>
+          <ul>
+            <li>
+              Maximum size of the stateful header compression table
+            </li>
+            <li>
+              Maximum amount of memory used per <code>Http2Session</code>
+            </li>
+            <li>
+              Maximum number of header pairs per <code>Http2Stream</code>
+            </li>
+            <li>
+              Maximum number of unacknowledged PING and SETTINGS frames
+            </li>
+            <li>
+              Maximum number of push stream requests
+            </li>
+            <li>
+              Maximum number of concurrent <code>Http2Streams</code>. 
+            </li>
+            <li>
+              Maximum number of bytes per block of headers
+            </li>
+            <li>
+              Multiple strategies for determining the amount of padding per
+              frame.
+            </li>
+          </ul>
+        </section>
+        <section>
+          <h1>Reporting Errors</h1>
+          <p>
+            HTTP/2 also introduces a new kind of <code>Http2Session</code>
+            level error reporting that is independent of HTTP status codes:
+          </p>
+          <ul style="font-size: 0.5em">
+            <li><code>0x00</code> - No Error</li>
+            <li><code>0x01</code> - Protocol Error</li>
+            <li><code>0x02</code> - Internal Error</li>
+            <li><code>0x03</code> - Flow Control Error</li>
+            <li><code>0x04</code> - Settings Timeout</li>
+            <li><code>0x05</code> - Stream Closed</li>
+            <li><code>0x06</code> - Frame Size Error</li>
+            <li><code>0x07</code> - Refused Stream</li>
+            <li><code>0x08</code> - Cancel</li>
+            <li><code>0x09</code> - Compression Error</li>
+            <li><code>0x0A</code> - Connect Error</li>
+            <li><code>0x0B</code> - Enhance Your Calm</li>
+            <li><code>0x0C</code> - Inadequate Security</li>
+            <li><code>0x0D</code> - HTTP/1.1 Required</li>
+          </ul>
+        </section>
+      </section>
+
+      <section data-background="media/hexagons.png" style="text-align: left;">
+        <section>
+          <h1>Collecting Performance Metrics</h1>
+          <p>
+            The Performance API can be used to monitor HTTP/2 performance..
+          </p>
+<pre><code class="hljs" data-trim contenteditable>
+const { PerformanceObserver } = require('perf_hooks');
+
+const obs = new PerformanceObserver((items) => {
+  const entry = items.getEntries()[0];
+  console.log(entry.entryType);  // prints 'http2'
+  if (entry.name === 'Http2Session') {
+    // entry contains statistics about the Http2Session
+  } else if (entry.name === 'Http2Stream') {
+    // entry contains statistics about the Http2Stream
+  }
+});
+obs.observe({ entryTypes: ['http2'] });
+</code></pre>
+        </section>
+        <section>
+          <h1>Collecting Performance Metrics</h1>
+          <p>The data currently available includes</p>
+          <ul>
+            <li>Bytes read/written</li>
+            <li>Time-to-first-byte-send/first-byte-received/first-header</li>
+            <li>Number of frames sent/received</li>
+            <li>Maximum number of concurrent streams</li>
+            <li>Ping round-trip-time</li>
+            <li>Average stream duration</li>
+            <li>Total number of streams</li>
+          </ul>
+        </section>
+      </section>
+
+      <section data-background="media/hexagons.png" style="text-align: left;">
+        <section>
+          <h1>What about the frameworks...</h1>
+          <p>
+            You can use HTTP/2 with fastify (https://npmjs.org/fastify) today.
+          </p>
+<pre><code class="hljs" data-trim contenteditable>
+const fs = require('fs')
+const path = require('path')
+const fastify = require('fastify')({
+  http2: true,
+  https: {
+    key: fs.readFileSync('fastify.key'),
+    cert: fs.readFileSync('fastify.cert')
+  }
+})
+
+fastify.get('/', function (request, reply) {
+  reply.code(200).send({ hello: 'world' })
+})
+
+fastify.listen(3000)
+</code></pre>
+          <p>
+            Support for HTTP/2 support in express is being actively worked on.
+          </p>
+        </section>
+        <section>
+          <h1>There's even a hosting option...</h1>
+          <p>
+            Node.js core contributor Sebastiaan Deckers has launched
+            https://http2.live...</p>
+          <img src="media/http2_live.png" 
+               style="margin-right: 20px; float: left; background: rgba(255, 255, 255, 0.82)"
+               width="350"/>
+        </section>
+      </section>
+
+      <section data-background="media/hexagons.png"  style="text-align: left;">
+        <h1>Thank you.</h1>
+        <p data-markdown>
+          - Twitter: [@jasnell](https://twitter.com/jasnell)
+          - GitHub: [@jasnell](https://github.com/jasnell)
+        </p>
+      </section>
+
+    </div>
+
+  </div>
+
+  <script src="lib/js/head.min.js"></script>
+  <script src="js/reveal.js"></script>
+
+  <script>
+
+    // More info https://github.com/hakimel/reveal.js#configuration
+    Reveal.initialize({
+      controls: true,
+      progress: true,
+      history: true,
+      center: true,
+
+      transition: 'slide', // none/fade/slide/convex/concave/zoom
+
+      // More info https://github.com/hakimel/reveal.js#dependencies
+      dependencies: [
+        { src: 'lib/js/classList.js', condition: function() { return !document.body.classList; } },
+        { src: 'plugin/markdown/marked.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+        { src: 'plugin/markdown/markdown.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+        { src: 'plugin/highlight/highlight.js', async: true, callback: function() { hljs.initHighlightingOnLoad(); } },
+        { src: 'plugin/zoom-js/zoom.js', async: true },
+        { src: 'plugin/notes/notes.js', async: true }
+      ]
+    });
+
+  </script>
+
+</body>
+</html>
